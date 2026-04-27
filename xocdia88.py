@@ -1,30 +1,27 @@
-from flask import Flask, jsonify
 import requests
 import time
 import threading
 import math
 import json
 import os
+from flask import Flask, jsonify
 from collections import deque, Counter
 from datetime import datetime
 
 app = Flask(__name__)
 
 # ================= CONFIG =================
+API_URL = "https://taixiumd5.system32-cloudfare-356783752985678522.monster/api/md5luckydice/GetSoiCau"
 MIN_PHIEN = 15
-MAX_HISTORY = 20
-DATA_FILE = "luckywin_ai_data.json"
-WEIGHTS_FILE = "luckywin_ai_weights.json"
-
-API_LIST = [
-    "https://luck8bot.com/api/GetNewLottery/TaixiuMd5?id=",
-    "http://luck8bot.com/api/GetNewLottery/TaixiuMd5?id="
-]
+MAX_HISTORY = 300
+DATA_FILE = "xocdia88_ai_data.json"
+WEIGHTS_FILE = "xocdia88_ai_weights.json"
 
 # ================= DATA =================
 history_tx = deque(maxlen=MAX_HISTORY)
 history_pt = deque(maxlen=MAX_HISTORY)
 history_id = deque(maxlen=MAX_HISTORY)
+history_dice = deque(maxlen=MAX_HISTORY)
 
 lich_su = []
 stats = {
@@ -32,7 +29,8 @@ stats = {
     "cd": 0, "cs": 0, "max_cd": 0, "max_cs": 0
 }
 
-last_result = {}
+data_now = {}
+last_phien = None
 _prev_pred = None
 _last_phien_processed = None
 
@@ -49,6 +47,7 @@ def save_data():
             "history": list(history_tx),
             "points": list(history_pt),
             "ids": list(history_id),
+            "dice": [list(d) for d in history_dice],
             "stats": stats,
             "lich_su": list(lich_su)[-200:],
             "last_phien": _last_phien_processed
@@ -64,30 +63,28 @@ def load_data():
         if os.path.exists(DATA_FILE):
             with open(DATA_FILE, "r") as f:
                 data = json.load(f)
-                # Load history
-                for h, p, i in zip(data.get("history", [])[-100:],
-                                   data.get("points", [])[-100:],
-                                   data.get("ids", [])[-100:]):
+                for h, p, i, d in zip(data.get("history", [])[-100:],
+                                      data.get("points", [])[-100:],
+                                      data.get("ids", [])[-100:],
+                                      data.get("dice", [])[-100:]):
                     history_tx.append(h)
                     history_pt.append(p)
                     history_id.append(i)
-                # Load stats
+                    history_dice.append(tuple(d))
                 saved_stats = data.get("stats", {})
                 for k in stats:
                     if k in saved_stats:
                         stats[k] = saved_stats[k]
-                # Load lich_su
                 saved_lich_su = data.get("lich_su", [])
                 lich_su.extend(saved_lich_su)
-                # Load last_phien
                 _last_phien_processed = data.get("last_phien")
-                print(f"[LOAD] Loaded {len(history_tx)} history, {len(lich_su)} records, last_phien={_last_phien_processed}")
+                print(f"[LOAD] Loaded {len(history_tx)} history, {len(lich_su)} records")
     except Exception as e:
         print(f"[LOAD ERROR] {e}")
 
-# ================= NHẬN DIỆN CẦU =================
+# ================= NHẬN DIỆN PATTERN =================
 
-class CauDetector:
+class PatternDetector:
     @staticmethod
     def detect(tx_list):
         if len(tx_list) < 5:
@@ -95,9 +92,9 @@ class CauDetector:
         
         s = encode(tx_list)
         n = len(s)
-        cau_list = []
+        patterns = []
         
-        # 1. Cầu bệt
+        # 1. Bệt
         streak = 0
         last = s[-1]
         for c in reversed(s):
@@ -106,64 +103,76 @@ class CauDetector:
             else:
                 break
         if streak >= 3:
-            cau_list.append(f"Bệt {decode(last)} x{streak}")
+            patterns.append(f"Bệt {decode(last)} x{streak}")
         
-        # 2. Cầu 1-1
+        # 2. 1-1
         if n >= 6:
-            recent6 = s[-6:]
-            if all(recent6[i] != recent6[i+1] for i in range(5)):
-                cau_list.append("Cầu 1-1 (T-X-T-X-T-X)")
+            recent = s[-6:]
+            if all(recent[i] != recent[i+1] for i in range(5)):
+                patterns.append("Cầu 1-1 (T-X-T-X-T-X)")
         
-        # 3. Cầu 2-2
+        # 3. 2-2
         if n >= 8:
-            recent8 = s[-8:]
-            is22 = True
-            for i in range(0, 6, 2):
-                if not (recent8[i] == recent8[i+1] and recent8[i+2] == recent8[i+3] and recent8[i] != recent8[i+2]):
-                    is22 = False
-                    break
-            if is22:
-                cau_list.append("Cầu 2-2 (TT-XX-TT-XX)")
+            recent = s[-8:]
+            if (recent[0]==recent[1] and recent[2]==recent[3] and 
+                recent[4]==recent[5] and recent[6]==recent[7] and
+                recent[0]!=recent[2] and recent[2]!=recent[4]):
+                patterns.append("Cầu 2-2 (TT-XX-TT-XX)")
         
-        # 4. Cầu 3-3
+        # 4. 3-3
         if n >= 12:
-            recent12 = s[-12:]
+            recent = s[-12:]
             is33 = True
             for i in range(0, 9, 3):
-                if not (recent12[i]==recent12[i+1]==recent12[i+2] and 
-                        recent12[i+3]==recent12[i+4]==recent12[i+5] and 
-                        recent12[i]!=recent12[i+3]):
+                if not (recent[i]==recent[i+1]==recent[i+2] and 
+                        recent[i+3]==recent[i+4]==recent[i+5] and 
+                        recent[i]!=recent[i+3]):
                     is33 = False
                     break
             if is33:
-                cau_list.append("Cầu 3-3 (TTT-XXX-TTT-XXX)")
+                patterns.append("Cầu 3-3 (TTT-XXX-TTT-XXX)")
         
-        # 5. Cầu đảo sau bệt
+        # 5. Đảo sau bệt
         if streak >= 3 and n >= streak + 2:
-            cau_list.append(f"Đảo sau bệt {streak}")
+            patterns.append(f"Đảo sau bệt {streak}")
         
-        # 6. Cầu cân bằng
+        # 6. Cân bằng
         if n >= 20:
             recent20 = s[-20:]
             t_count = recent20.count("T")
             if t_count >= 14:
-                cau_list.append(f"Tài thiên lệch {t_count}/20 -> chờ Xỉu")
+                patterns.append(f"Tài thiên lệch {t_count}/20 -> chờ Xỉu")
             elif t_count <= 6:
-                cau_list.append(f"Xỉu thiên lệch {20-t_count}/20 -> chờ Tài")
+                patterns.append(f"Xỉu thiên lệch {20-t_count}/20 -> chờ Tài")
         
-        # 7. Cầu chu kỳ
+        # 7. Chu kỳ
         if n >= 15:
             for cycle in range(2, 8):
                 if n >= cycle * 3:
                     recent = s[-cycle*3:]
                     if all(recent[i] == recent[i+cycle] == recent[i+cycle*2] for i in range(cycle)):
-                        cau_list.append(f"Chu kỳ lặp {cycle}")
+                        patterns.append(f"Chu kỳ lặp {cycle}")
                         break
         
-        if not cau_list:
-            return "Cầu hỗn loạn / Không nhận diện", []
+        # 8. Bệt ngắn xen kẽ
+        if n >= 10:
+            recent10 = s[-10:]
+            streaks_short = []
+            cur = 1
+            for i in range(1, len(recent10)):
+                if recent10[i] == recent10[i-1]:
+                    cur += 1
+                else:
+                    streaks_short.append(cur)
+                    cur = 1
+            streaks_short.append(cur)
+            if all(x <= 2 for x in streaks_short[-5:]) and len(streaks_short) >= 5:
+                patterns.append("Cầu ngắn xen kẽ (1-2)")
         
-        return " | ".join(cau_list), cau_list
+        if not patterns:
+            return "Không nhận diện được pattern rõ ràng", []
+        
+        return " | ".join(patterns), patterns
 
 # ================= 20 AI MODELS =================
 
@@ -732,7 +741,7 @@ ai_engine = SuperEnsemble()
 load_data()
 
 # ================= PREDICT =================
-def predict(tx_list):
+def predict_next(tx_list):
     if len(tx_list) < MIN_PHIEN:
         return "Chờ dữ liệu", "0%", {}, {}, "Chưa đủ 15 phiên"
     pred, conf, details, weights, reason = ai_engine.predict(tx_list)
@@ -796,64 +805,54 @@ def tinh_chuoi(tx_list):
     
     return current_streak, current_type, max_tai, max_xiu
 
-# ================= NHẬN DIỆN CẦU =================
-def nhan_dien_cau(tx_list):
-    cau_text, cau_list = CauDetector.detect(tx_list)
-    return cau_text, cau_list
+# ================= NHẬN DIỆN PATTERN =================
+def nhan_dien_pattern(tx_list):
+    pattern_text, pattern_list = PatternDetector.detect(tx_list)
+    return pattern_text, pattern_list
 
-# ================= GET DATA =================
-def get_data():
-    for url in API_LIST:
+# ================= FETCH DATA =================
+def fetch_data():
+    global data_now, last_phien, _prev_pred, _last_phien_processed
+    
+    while True:
         try:
-            res = requests.get(url, timeout=3)
+            res = requests.get(API_URL, timeout=5)
             if res.status_code != 200:
+                time.sleep(2)
                 continue
             
             data = res.json()
-            if "data" not in data:
+            if not isinstance(data, list) or len(data) == 0:
+                time.sleep(2)
                 continue
             
-            info = data["data"]
-            phien = int(info.get("Expect", 0))
-            dice = [int(x) for x in info.get("OpenCode", "0,0,0").split(",")]
-            tong = sum(dice)
+            latest = data[0]
+            phien = latest.get("SessionId")
             
-            return phien, dice, tong
-        except:
-            continue
-    return None
-
-# ================= BACKGROUND =================
-def background():
-    global last_result, _prev_pred, history_tx, history_pt, history_id, _last_phien_processed
-    
-    last_phien = None
-    
-    while True:
-        data = get_data()
-        
-        if data:
-            phien, dice, tong = data
-            
-            # Kiểm tra trùng phiên - FIX LỖI LỊCH SỬ
+            # FIX: Kiểm tra trùng phiên
             if phien == last_phien or phien == _last_phien_processed:
                 time.sleep(1)
                 continue
             
+            d1 = latest.get("FirstDice", 0)
+            d2 = latest.get("SecondDice", 0)
+            d3 = latest.get("ThirdDice", 0)
+            tong = latest.get("DiceSum", 0)
+            
             ket = "Tài" if tong >= 11 else "Xỉu"
-            tx = "T" if ket == "Tài" else "X"
             
             # Huấn luyện AI với dữ liệu TRƯỚC KHI thêm phiên mới
             if len(history_tx) >= MIN_PHIEN and _prev_pred and _prev_pred != "Chờ dữ liệu":
                 ai_engine.update(ket, list(history_tx))
             
-            # Cập nhật stats (so sánh dự đoán trước với kết quả hiện tại)
-            update_stats(tx, phien)
+            # Cập nhật stats
+            update_stats(ket, phien)
             
             # Lưu history mới
             history_tx.append(ket)
             history_pt.append(tong)
             history_id.append(phien)
+            history_dice.append((d1, d2, d3))
             
             # Đánh dấu phiên đã xử lý
             _last_phien_processed = phien
@@ -862,58 +861,53 @@ def background():
             # Tính chuỗi
             streak, stype, max_tai, max_xiu = tinh_chuoi(list(history_tx))
             
-            # Nhận diện cầu
-            cau_text, cau_list = nhan_dien_cau(list(history_tx))
+            # Nhận diện pattern
+            pattern_text, pattern_list = nhan_dien_pattern(list(history_tx))
             
-            # AI Predict cho phiên TIẾP THEO
+            # AI Predict cho phiên tiếp theo
             tx_list = list(history_tx)
-            du_doan, do_tin_cay, model_confs, weights, phan_tich = predict(tx_list)
+            du_doan, do_tin_cay, model_confs, weights, phan_tich = predict_next(tx_list)
             _prev_pred = du_doan
             
-            # Pattern
-            pattern = encode(tx_list)[-25:] if len(tx_list) >= 25 else encode(tx_list)
+            # Pattern string
+            pattern_str = encode(tx_list)[-25:] if len(tx_list) >= 25 else encode(tx_list)
             
             # Tỷ lệ thật
             td = stats["tong"]
             ty_le = f"{stats['dung']/td*100:.1f}%" if td else "0%"
             
-            # Build result
-            last_result = {
-                "status": "success",
-                "data": {
-                    "Phien": phien,
-                    "Xuc_xac_1": dice[0],
-                    "Xuc_xac_2": dice[1],
-                    "Xuc_xac_3": dice[2],
-                    "Tong": tong,
-                    "Ket": ket,
-                    "Phien_hien_tai": phien + 1,
-                    "Du_doan": du_doan,
-                    "Do_tin_cay": do_tin_cay,
-                    "Pattern": pattern,
-                    "Cau": cau_text,
-                    "Chi_tiet_cau": cau_list,
-                    "Chuoi_hien_tai": f"{stype} x{streak}" if stype else "N/A",
-                    "Max_chuoi_Tai": max_tai,
-                    "Max_chuoi_Xiu": max_xiu,
-                    "Ty_le_dung": ty_le,
-                    "AI_Models": model_confs,
-                    "Trong_so": {k: round(v, 2) for k, v in weights.items()},
-                    "Phan_tich": phan_tich,
-                    "So_phien_hoc": len(tx_list),
-                  
-                }
+            data_now = {
+                "Phien": phien,
+                "Xuc_xac_1": d1,
+                "Xuc_xac_2": d2,
+                "Xuc_xac_3": d3,
+                "Tong": tong,
+                "Ket": ket,
+                "Phien_hien_tai": phien + 1,
+                "Du_doan": du_doan,
+                "Do_tin_cay": do_tin_cay,
+                "Pattern": pattern_str,
+                "Cau": pattern_text,
+                "Chi_tiet_cau": pattern_list,
+                "Max_chuoi_Tai": max_tai,
+                "Max_chuoi_Xiu": max_xiu,
+                "Ty_le_dung": ty_le,
+                "AI_Models": model_confs,
+                "Trong_so": {k: round(v, 2) for k, v in weights.items()},
+                "Phan_tich": phan_tich,
+                "So_phien_hoc": len(tx_list),
+               
             }
             
             # Save data
             save_data()
             
-            # Log console
+            
             print("\n" + "=" * 75)
-            print(f"🎲 PHIÊN {phien} | {dice[0]}-{dice[1]}-{dice[2]} = {tong} [{ket}]")
+            print(f"🎲 PHIÊN {phien} | {d1}-{d2}-{d3} = {tong} [{ket}]")
             print("-" * 75)
-            print(f"Pattern  : {pattern}")
-            print(f"Cầu      : {cau_text}")
+            print(f"Pattern  : {pattern_str}")
+            print(f"Cầu      : {pattern_text}")
             print(f"Chuỗi    : {stype} x{streak}" if stype else "Chuỗi    : N/A")
             print(f"🔮 Dự đoán: >>> {du_doan} <<< ({do_tin_cay})")
             print(f"📊 Tỷ lệ  : {ty_le} ({stats['dung']}/{td})")
@@ -922,13 +916,20 @@ def background():
                 active = {k: v for k, v in model_confs.items() if v > 0}
                 print(f"🤖 AI ({len(active)}/20 models): {active}")
             print("=" * 75)
+            
+        except Exception as e:
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] Lỗi: {e}")
         
         time.sleep(2)
 
 # ================= API =================
+@app.route("/")
+def home():
+    return jsonify({"status": "ok", "data": data_now})
+
 @app.route("/api/taixiumd5")
 def api_main():
-    return jsonify(last_result if last_result else {"status": "waiting"})
+    return jsonify(data_now)
 
 @app.route("/api/lichsu")
 def api_history():
@@ -942,16 +943,12 @@ def api_history():
         "max_cs": stats["max_cs"],
         "chuoi_hien_tai_dung": stats["cd"],
         "chuoi_hien_tai_sai": stats["cs"],
-        "lich_su_20": list(lich_su)[-20:],
-        "lich_su_50": list(lich_su)[-50:],
+        "20_phien": list(lich_su)[-20:],
+        "50_phien": list(lich_su)[-50:],
         "lich_su_day_du": list(lich_su)[-100:],
         "ai_weights": {k: round(v, 2) for k, v in ai_engine.weights.items()},
         "ai_performance": ai_engine.performance
     })
-
-@app.route("/")
-def home():
-    return jsonify({"status": "ok", "data": last_result.get("data", {})})
 
 @app.route("/api/thongke")
 def api_thongke():
@@ -960,7 +957,7 @@ def api_thongke():
         return jsonify({"error": "Chua du du lieu", "so_phien": len(tx_list)})
     
     s = encode(tx_list)
-    cau_text, cau_list = nhan_dien_cau(tx_list)
+    pattern_text, pattern_list = nhan_dien_pattern(tx_list)
     
     return jsonify({
         "tong_phien": len(tx_list),
@@ -971,7 +968,7 @@ def api_thongke():
         "pattern_50": s[-50:] if len(s) >= 50 else s,
         "max_tai": stats["max_cd"],
         "max_xiu": stats["max_cs"],
-        "cau_hien_tai": cau_text,
+        "cau_hien_tai": pattern_text,
         "ai_active": len([m for m in ai_engine.weights.values() if m > 0.5]),
         "models_performance": ai_engine.performance
     })
@@ -979,15 +976,16 @@ def api_thongke():
 @app.route("/api/cau")
 def api_cau():
     tx_list = list(history_tx)
-    cau_text, cau_list = nhan_dien_cau(tx_list)
+    pattern_text, pattern_list = nhan_dien_pattern(tx_list)
     return jsonify({
-        "cau": cau_text,
-        "chi_tiet": cau_list,
+        "cau": pattern_text,
+        "chi_tiet": pattern_list,
         "so_phien_phan_tich": len(tx_list),
         "pattern": encode(tx_list)[-30:] if len(tx_list) >= 30 else encode(tx_list)
     })
 
 # ================= RUN =================
+threading.Thread(target=fetch_data, daemon=True).start()
+
 if __name__ == "__main__":
-    threading.Thread(target=background, daemon=True).start()
     app.run(host="0.0.0.0", port=5000)
