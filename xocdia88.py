@@ -897,7 +897,6 @@ def background():
                     "Max_chuoi_Tai": max_tai,
                     "Max_chuoi_Xiu": max_xiu,
                     "Ty_le_dung": ty_le,
-                    "Thong_ke": f"Dung:{stats['dung']} Sai:{stats['sai']} Tong:{td}",
                     "AI_Models": model_confs,
                     "Trong_so": {k: round(v, 2) for k, v in weights.items()},
                     "Phan_tich": phan_tich,
